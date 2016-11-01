@@ -3,17 +3,28 @@
 const express = require('express');
 const app = express();
 const https = require('https');
-const mongo = require('mongodb').MongoClient;
+const mongo = require('mongodb');
+const co = require('co');
 const concat = require('concat-stream');
 
 const db_url = process.env.MONGOLAB_URI || 'mongodb://localhost:27017/database';
 const db_searches_collection_name = 'image_searches';
 
+console.log(mongo);
+
 app.set('port', process.env.PORT || 8080);
 
 app.use(require('response-time')());
 
-app.get('/api/imagesearch/:query', function(req, res, next) {
+app.get('/api/imagesearch/:query', searchImages, logSearch);
+
+app.get('/api/latest/imagesearch', latestSearches);
+
+app.listen(app.get('port'), function() {
+    console.log('Server up');
+});
+
+function searchImages(req, res, next) {
     let offset = 0;
     if(req.query.hasOwnProperty('offset')) {
         offset = Number(req.query.offset);
@@ -34,24 +45,7 @@ app.get('/api/imagesearch/:query', function(req, res, next) {
     }).on('error', function(err) {
         next(err);
     });
-}, function(req, res, next) {
-    // search ok, log search in db
-    mongo.connect(db_url, function(err, db) {
-        if(err) 
-            return next(err);
-            
-        let searches = db.collection(db_searches_collection_name);
-        searches.insertOne({
-            query: req.params.query,
-            timestamp: new Date().getTime()
-        }, function(err, r) {
-            if(err)
-                console.log(err);
-            
-            db.close();
-        });
-    });
-});
+}
 
 function getCSEApiEndpoint(query, offset) {
     return 'https://www.googleapis.com/customsearch/v1?parameters'
@@ -91,44 +85,55 @@ function buildSearchJsonOut(data) {
     return out;
 }
 
-app.get('/api/latest/imagesearch', function(req, res, next) {
-    mongo.connect(db_url, function(err, db) {
-        if(err)
-            return next(err);
-        
-        db.collection(db_searches_collection_name, 
-            { strict: true }, // don't create collection if it does not exist
-            function(err, collection) {
-                if(!err) {
-                    collection.find({}, {
-                        _id: 0
-                    }).limit(10)
-                    .sort({ timestamp: -1 })
-                    .toArray(function(err, docs) {
-                        let out = [];
-                        if(err) {
-                            console.log(err);
-                        } else if(docs) {
-                            docs.forEach(function(doc) {
-                                let item = {};
-                                item.term = doc.query;
-                                item.when = new Date(doc.timestamp).toUTCString();
-                                out.push(item);
-                            });
-                        }
-                        
-                        db.close();
-                        res.json(out);
-                    });
-                } else {
-                    db.close();
-                    res.json([]);
-                }
-            }
-        );
+function logSearch(req, res, next) {
+    // search ok, log search in db
+    let db;
+    co(function*() {
+        db = yield mongo.connect(db_url);
+        let searches = db.collection(db_searches_collection_name);
+        return yield searches.insertOne({
+            query: req.params.query,
+            timestamp: new Date().getTime()
+        });
+    })
+    .catch(function(err) {
+        console.log('Could not log search: ' + err);
+    })
+    .then(function() {
+        if(db)
+            db.close();
     });
-});
+}
 
-app.listen(app.get('port'), function() {
-    console.log('Server up');
-});
+function latestSearches(req, res, next) {
+    let db;
+    co(function*() {
+        db = yield mongo.connect(db_url);
+        
+        let collection = db.collection(db_searches_collection_name);
+        
+        let docs = yield collection.find({}, { _id: 0 })
+                            .limit(10)
+                            .sort({ timestamp: -1 })
+                            .toArray();
+        
+        return docs.map(doc => ({ 
+            term: doc.query,
+            when: new Date(doc.timestamp).toUTCString()
+        }));
+    })
+    .then(function(r) {
+        res.json(r);
+    })
+    .catch(function(err) {
+        console.log(err);
+        res.status(500).json([]);
+    })
+    .then(function() {
+        if(db)
+            db.close();
+    })
+    .catch(function(err) {
+       console.log(err) ;
+    });
+}
