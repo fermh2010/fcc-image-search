@@ -10,8 +10,6 @@ const concat = require('concat-stream');
 const db_url = process.env.MONGOLAB_URI || 'mongodb://localhost:27017/database';
 const db_searches_collection_name = 'image_searches';
 
-console.log(mongo);
-
 app.set('port', process.env.PORT || 8080);
 
 app.use(require('response-time')());
